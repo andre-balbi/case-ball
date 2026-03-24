@@ -1,4 +1,4 @@
-# Supply Chain Analytics — Ball Corporation
+# Supply Chain Analytics - Ball Corporation
 
 Analise de dados operacionais de supply chain (2023-2024) para as regioes LATAM, NA, EU e APAC, produtos A, B e C.
 
@@ -16,6 +16,17 @@ uv pip install -r requirements.txt
 ```
 
 O pipeline executa as tres camadas em sequencia e gera todos os arquivos de saida.
+
+### Dashboard Streamlit (local)
+
+Pre-requisito: executar o pipeline (`main.py`) para gerar os artefatos em `data/gold/`.
+
+```bash
+# rodar o dashboard localmente
+.venv/bin/streamlit run app/dashboard.py --server.port 8000
+```
+
+O dashboard consome os artefatos gerados em `data/gold/` e usa o tema claro definido em `.streamlit/config.toml`. O logo `figs/logo-ball.jpg` esta empacotado no repositorio; basta executar localmente, sem configuracao extra.
 
 ## Estrutura
 
@@ -43,16 +54,16 @@ main.py          # Orquestrador do pipeline
 
 ## Saidas da Camada Gold
 
-| Arquivo | Conteudo |
-|---|---|
-| `otif_summary.csv` | OTIF geral, atraso medio, mediano e P90 |
-| `otif_by_region.csv` | OTIF por regiao |
-| `otif_by_product.csv` | OTIF por produto |
-| `otif_monthly.csv` | OTIF mensal (2023-2024) |
-| `stockout_summary.csv` | Frequencia de stockout por regiao/produto |
-| `overflow_summary.csv` | Frequencia de overflow por regiao/produto |
-| `production_utilization.csv` | Taxa de utilizacao por planta/produto |
-| `supply_demand_gap.csv` | Gap diario oferta/demanda com flag de gap cronico |
+| Arquivo                        | Conteudo                                          |
+| ------------------------------ | ------------------------------------------------- |
+| `otif_summary.csv`           | OTIF geral, atraso medio, mediano e P90           |
+| `otif_by_region.csv`         | OTIF por regiao                                   |
+| `otif_by_product.csv`        | OTIF por produto                                  |
+| `otif_monthly.csv`           | OTIF mensal (2023-2024)                           |
+| `stockout_summary.csv`       | Frequencia de stockout por regiao/produto         |
+| `overflow_summary.csv`       | Frequencia de overflow por regiao/produto         |
+| `production_utilization.csv` | Taxa de utilizacao por planta/produto             |
+| `supply_demand_gap.csv`      | Gap diario oferta/demanda com flag de gap cronico |
 
 ## Resultado Principal
 

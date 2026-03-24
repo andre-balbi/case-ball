@@ -6,8 +6,10 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-ROOT = Path(__file__).parent.parent
-OBT  = ROOT / "data" / "gold" / "obt.parquet"
+ROOT   = Path(__file__).parent.parent
+OBT    = ROOT / "data" / "gold" / "obt.parquet"
+SILVER = ROOT / "data" / "silver"
+LOGO   = ROOT / "figs" / "logo-ball.jpg"
 BLUE   = "#1f77b4"
 RED    = "#d62728"
 GREEN  = "#2ca02c"
@@ -22,6 +24,9 @@ st.set_page_config(
 st.markdown("""
 <style>
     section[data-testid="stSidebar"] { background-color: #ffffff; }
+    :root { color-scheme: light; }
+    div[data-testid="stAppViewContainer"] { background-color: #ffffff; color: #262730; }
+    div[data-testid="stHeader"] { background-color: #ffffff; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -37,6 +42,45 @@ def carregar_dados() -> pd.DataFrame:
     return df
 
 
+@st.cache_data
+def carregar_pedidos_com_stockout() -> pd.DataFrame:
+    """Para cada pedido com data de entrega, verifica se houve stockout em qualquer dia do ciclo order->delivery."""
+    conn = duckdb.connect()
+    df = conn.execute(f"""
+        WITH ordens AS (
+            SELECT order_id, region, product, order_date, actual_delivery_date, on_time
+            FROM read_parquet('{SILVER}/orders.parquet')
+            WHERE actual_delivery_date IS NOT NULL
+        ),
+        dias_stockout AS (
+            SELECT date, region, product
+            FROM read_parquet('{SILVER}/inventory.parquet')
+            WHERE stockout_flag = TRUE
+        ),
+        pedidos_com_stockout AS (
+            SELECT DISTINCT o.order_id
+            FROM ordens o
+            INNER JOIN dias_stockout s
+                ON o.region = s.region
+                AND o.product = s.product
+                AND s.date >= o.order_date
+                AND s.date <= o.actual_delivery_date
+        )
+        SELECT
+            o.order_id,
+            o.region,
+            o.product,
+            o.order_date,
+            o.on_time,
+            CASE WHEN pcs.order_id IS NOT NULL THEN TRUE ELSE FALSE END AS had_stockout
+        FROM ordens o
+        LEFT JOIN pedidos_com_stockout pcs ON o.order_id = pcs.order_id
+    """).df()
+    conn.close()
+    df["order_date"] = pd.to_datetime(df["order_date"])
+    return df
+
+
 def aplicar_filtros(df, regioes, produtos, inicio, fim):
     mask = (
         df["region"].isin(regioes)
@@ -48,7 +92,11 @@ def aplicar_filtros(df, regioes, produtos, inicio, fim):
 
 
 def renderizar_sidebar(df):
-    st.sidebar.image(str(ROOT / "figs" / "logo-ball.jpg"), use_container_width=True)
+    if LOGO.exists():
+        try:
+            st.sidebar.image(str(LOGO), use_container_width=True)
+        except TypeError:
+            st.sidebar.image(str(LOGO), use_column_width=True)
     st.sidebar.header("Filtros")
 
     todas_regioes = sorted(df["region"].unique())
@@ -116,8 +164,8 @@ def tab_problema(df: pd.DataFrame, granularidade: str):
     st.subheader("Qual e o problema?")
     st.caption(
         "OTIF (On Time In Full) sintetiza falhas de estoque, producao e logistica em um unico numero. "
-        "Com OTIF de 17,5%, apenas 1 em cada 6 pedidos e entregue no prazo e na quantidade correta. "
-        "Os graficos abaixo mostram quando o problema ocorre e quais produtos e regioes sao mais afetados."
+        "Os graficos abaixo mostram quando o problema ocorre e quais produtos e regioes sao mais afetados. "
+        "Limitacao: os dados nao registram quantidade entregue, apenas solicitada: o indicador mede pontualidade (OTD). O componente 'In Full' nao pode ser aferido."
     )
 
     d = df[df["total_pedidos"] > 0]
@@ -129,7 +177,7 @@ def tab_problema(df: pd.DataFrame, granularidade: str):
     )
     q3_otif = float(otif_q.get("Q3", 0))
     q1_otif = float(otif_q.get("Q1", 0))
-    atraso  = round(d["atraso_medio"].mean(), 1)
+    lead_time = round(5 + d["atraso_medio"].mean(), 1)
 
     # OTIF por produto
     otif_prod = (
@@ -142,7 +190,7 @@ def tab_problema(df: pd.DataFrame, granularidade: str):
     cols = st.columns(4)
     kpi_row(cols, [
         ("OTIF Geral", f"{otif_geral}%", None, None),
-        ("Atraso medio (dias)", f"{atraso}", None, "off"),
+        ("Lead time medio (dias)", f"{lead_time}", None, "off"),
         ("OTIF Q3 vs media", f"{q3_otif}%", f"{q3_otif - otif_geral:+.1f}pp", "inverse"),
         (f"Pior produto: {pior_prod}", f"{pior_valor}%", None, "off"),
     ])
@@ -153,8 +201,8 @@ def tab_problema(df: pd.DataFrame, granularidade: str):
     with st.expander("Por que esses graficos?", expanded=True):
         st.caption(
             "Motivacao: verificar se o OTIF baixo e um problema pontual ou estrutural. "
-            "Conclusao: o padrao se repete em todos os periodos, com Q3 sistematicamente abaixo da media , "
-            "o problema e estrutural e previsivel, nao um evento isolado."
+            "Os dados sugerem que o padrao se repete em todos os periodos, com um trimestre sistematicamente abaixo da media. "
+            "Se as premissas de leitura dos dados estiverem corretas, o problema parece estrutural e previsivel, nao um evento isolado."
         )
     col1, col2 = st.columns(2)
 
@@ -228,7 +276,7 @@ def tab_problema(df: pd.DataFrame, granularidade: str):
     with st.expander("Por que esse grafico?", expanded=True):
         st.caption(
             "Motivacao: verificar se o problema afeta todos os produtos e regioes igualmente ou se ha combinacoes criticas. "
-            "Conclusao: Produto C em EU concentra o pior desempenho , ha heterogeneidade que permite priorizar acoes especificas."
+            "Ha heterogeneidade que permite priorizar acoes especificas."
         )
     st.markdown("**OTIF% por produto e regiao , Produto C e EU como pior combinacao**")
     otif_pr = (
@@ -271,17 +319,19 @@ def tab_estoque(df: pd.DataFrame, granularidade: str):
     deseq = so_df.merge(ov_df, on=["date", "product"])
     deseq = deseq[deseq["regiao_stockout"] != deseq["regiao_overflow"]]
     dias_deseq = deseq["date"].nunique()
-    unid_paradas = int(deseq["stock_level"].sum())
+    unid_paradas = int(deseq["stock_level"].mean()) if not deseq.empty else 0
 
-    stockout_by_region = df.groupby("region")["stockout_flag"].sum()
-    pior_so_regiao = stockout_by_region.idxmax() if not stockout_by_region.empty else "-"
-    dias_so_pior = int(stockout_by_region.max()) if not stockout_by_region.empty else 0
+    stockout_dias_regiao = (
+        df[df["stockout_flag"]].groupby("region")["date"].nunique()
+    )
+    pior_so_regiao = stockout_dias_regiao.idxmax() if not stockout_dias_regiao.empty else "-"
+    dias_so_pior = int(stockout_dias_regiao.max()) if not stockout_dias_regiao.empty else 0
 
     cols = st.columns(3)
     kpi_row(cols, [
         (f"Dias {pior_so_regiao} em stockout", f"{dias_so_pior}", None, "off"),
         ("Dias desequilibrio simultaneo", f"{dias_deseq}", None, "off"),
-        ("Unidades paradas (outra regiao)", f"{unid_paradas:,}", None, "off"),
+        ("Estoque medio parado em overflow (un.)", f"{unid_paradas:,}", None, "off"),
     ])
 
     st.markdown("---")
@@ -290,7 +340,7 @@ def tab_estoque(df: pd.DataFrame, granularidade: str):
     with st.expander("Por que esses graficos?", expanded=True):
         st.caption(
             "Motivacao: mapear onde o estoque falha , ruptura ou excesso , por regiao e periodo. "
-            "Conclusao: o problema nao e uniforme; algumas regioes sofrem stockout cronico enquanto outras acumulam overflow nos mesmos periodos."
+            "O problema nao e uniforme; algumas regioes sofrem stockout cronico enquanto outras acumulam overflow nos mesmos periodos."
         )
     col1, col2 = st.columns(2)
 
@@ -327,8 +377,7 @@ def tab_estoque(df: pd.DataFrame, granularidade: str):
             "O eixo X mostra quantos dias unicos isso aconteceu. "
             "A legenda 'Regiao com overflow' identifica quem tinha estoque sobrando e poderia ter redistribuido. "
             "A regiao que estava em falta nao aparece neste grafico , mas qualquer uma delas pode ser a origem da ruptura. "
-            "Conclusao: para o Produto C, LATAM ficou com excesso por ~17 dias enquanto outra regiao estava sem estoque do mesmo item , "
-            "o que indica que o problema nao e falta de producao , e falta de redistribuicao entre regioes."
+            "Onde o desequilibrio e mais intenso, o problema nao e falta de producao , e falta de redistribuicao entre regioes."
         )
     st.markdown("**Dias com desequilibrio simultaneo , stockout em uma regiao e overflow em outra, mesmo produto, mesmo dia**")
     if not deseq.empty:
@@ -361,8 +410,8 @@ def tab_estoque(df: pd.DataFrame, granularidade: str):
             "Motivacao: o desequilibrio de estoque so e um problema real se stockout e overflow ocorrem AO MESMO TEMPO no mesmo produto , "
             "caso contrario podem ser sazonalidades distintas sem relacao entre si. "
             "Como ler: o label 'A → B' significa que A tem excesso (overflow) e deveria redistribuir para B, que esta em stockout no mesmo dia. "
-            "Conclusao: cada ponto e por definicao um evento simultaneo confirmado. "
-            "Produto C entre LATAM e EU acumula mais dias e mais unidades paradas , a redistribuicao de LATAM para EU resolveria a ruptura sem aumentar producao."
+            "Cada ponto e por definicao um evento simultaneo confirmado. "
+            "Os pares com maior concentracao de dias e unidades paradas indicam onde uma redistribuicao possivelmente reduziria a ruptura sem necessidade de aumentar producao, sujeito a validacao operacional."
         )
     st.markdown("**Dias e volume de desequilibrio simultaneo por par de regioes , mesmo produto, mesmo dia**")
 
@@ -413,7 +462,7 @@ def tab_estoque(df: pd.DataFrame, granularidade: str):
             "Motivacao: verificar se o stock_level diario de diferentes regioes tem alguma relacao estatistica para o mesmo produto. "
             "Limitacao importante: o OBT nao tem dados de reposicao , entao nao e possivel deduzir quando ou se uma regiao recebeu abastecimento. "
             "A correlacao mede apenas se os niveis sobem e descem juntos no mesmo dia , o que pode ser baixo ate em cadeias coordenadas se as demandas regionais forem diferentes. "
-            "Este grafico e um sinal fraco. A evidencia mais direta de descoordenaacao esta no grafico anterior: mesmo produto em stockout em uma regiao e overflow em outra no mesmo dia."
+            "Este grafico e um sinal fraco; o indicador mais direto de possivel descoordinacao esta no grafico anterior."
         )
     st.markdown("**Correlacao de Pearson do stock_level diario entre regioes , por produto**")
     st.caption("Cada celula = correlacao entre o stock_level diario de duas regioes para o mesmo produto. Sinal fraco por si so , use em conjunto com o grafico de desequilibrio simultaneo.")
@@ -459,14 +508,17 @@ def tab_estoque(df: pd.DataFrame, granularidade: str):
 def tab_causas(df: pd.DataFrame, granularidade: str):
     st.subheader("O que causa os atrasos graves?")
     st.caption(
-        "Se stockout e atraso co-ocorrem nos mesmos periodos, ha evidencia de causalidade temporal. "
-        "Os graficos abaixo testam essa hipotese: quando o estoque acaba em uma regiao, os pedidos atrasam. "
-        "Resolver o desequilibrio de distribuicao elevaria o OTIF de forma direta e mensuravel."
+        "Se stockout e atraso co-ocorrem nos mesmos periodos, ha indicio de causalidade temporal, mas os dados nao provam relacao direta de causa e efeito. "
+        "Uma parcela significativa dos dias do calendario registra algum stockout em alguma regiao. "
+        "Quando rastreado pelo ciclo completo de entrega (order_date ate actual_delivery_date), uma parcela dos pedidos passa por pelo menos um dia de stockout, com OTIF inferior ao grupo sem stockout. "
+        "Se essa associacao for causal, o ganho potencial ao eliminar rupturas e calculado dinamicamente no grafico com base nos filtros ativos."
     )
 
     d = df[df["total_pedidos"] > 0]
     pct_atraso = round(100 * d["pedidos_com_atraso"].sum() / d["total_pedidos"].sum(), 1)
-    pct_stockout = round(100 * df["stockout_flag"].mean(), 1)
+    dias_total   = df["date"].nunique()
+    dias_stockout = df[df["stockout_flag"]]["date"].nunique()
+    pct_stockout = round(100 * dias_stockout / dias_total, 1) if dias_total > 0 else 0
     otif_by_so = d.groupby("stockout_flag").apply(
         lambda g: round(100 * g["pedidos_on_time"].sum() / g["total_pedidos"].sum(), 1)
     )
@@ -479,6 +531,10 @@ def tab_causas(df: pd.DataFrame, granularidade: str):
         ("Dias com stockout", f"{pct_stockout}%", None, "off"),
         ("OTIF: sem vs com stockout", f"{otif_ns}% vs {otif_s}%", None, "off"),
     ])
+    st.caption(
+        "Definicao adotada: stockout_flag = stock_level <= 0 (ja inclui backorder). "
+        "A maioria dos registros de stockout corresponde a estoque negativo, nao a ruptura pontual com zero unidades."
+    )
 
     st.markdown("---")
 
@@ -488,10 +544,10 @@ def tab_causas(df: pd.DataFrame, granularidade: str):
         st.caption(
             "Este grafico sobrepoe dois indicadores no mesmo eixo de tempo: a porcentagem de dias com stockout (barras, eixo esquerdo) "
             "e o atraso medio de entrega em dias (linha, eixo direito). "
-            "Se os dois sobem e descem juntos nos mesmos periodos, ha evidencia temporal de que a ruptura de estoque precede ou coincide com os atrasos , "
-            "o que sugere relacao de causa e efeito. Nao prova causalidade direta , mas e o tipo de padrao que justifica investigar stockout como causa raiz antes de outras hipoteses."
+            "Se os dois sobem e descem juntos nos mesmos periodos, ha evidencia temporal de que a ruptura de estoque precede ou coincide com os atrasos. "
+            "Nao prova causalidade direta, mas e o tipo de padrao que justifica investigar stockout como possivel causa raiz antes de outras hipoteses."
         )
-    st.markdown(f"**Stockout e atraso co-ocorrem por {label} , evidencia de causalidade**")
+    st.markdown(f"**Stockout e atraso co-ocorrem por {label} , possivel indicativo de causalidade**")
 
     causal = (
         _add_periodo(df, granularidade)
@@ -534,11 +590,9 @@ def tab_causas(df: pd.DataFrame, granularidade: str):
     with st.expander("O que esses graficos me fornecem?", expanded=True):
         st.caption(
             "Grafico da esquerda: mostra a taxa de stockout (% de dias com ruptura) separada por produto e periodo. "
-            "Permite identificar qual produto tem mais rupturas e se o problema e constante ou concentrado em periodos especificos. "
-            "Grafico da direita: simula o OTIF total se os pedidos dos dias com stockout tivessem a mesma taxa de cumprimento dos dias sem stockout. "
-            "Resultado esperado: o ganho e pequeno (~0.2pp) porque stockout afeta apenas ~4% dos pedidos em volume. "
-            "Isso revela que stockout NAO e a causa primaria do OTIF baixo: mesmo nos dias sem ruptura o OTIF e de apenas 17.7%. "
-            "O principal driver e o desalinhamento entre o SLA contratado (5 dias) e o lead time real (8.8 dias em media), gerando atraso de 3.8 dias por pedido e classificando 77.6% dos pedidos como falha independente de stockout. Ver Tab 4 para simulacao de SLA."
+            "Grafico da direita: simula o OTIF total se todos os pedidos que passaram por stockout no seu ciclo (order_date ate actual_delivery_date) tivessem a mesma taxa dos pedidos sem stockout. "
+            "Metodo: range join pedido x inventario. Assumindo que a associacao e causal, o ganho estimado e calculado dinamicamente no grafico com base nos filtros ativos. "
+            "O principal driver do OTIF baixo parece ser o desalinhamento entre o SLA contratado e o lead time real, afetando a maioria dos pedidos independentemente de stockout."
         )
     col1, col2 = st.columns(2)
 
@@ -565,17 +619,31 @@ def tab_causas(df: pd.DataFrame, granularidade: str):
         )
         st.plotly_chart(fig, use_container_width=True, config=CHART_CONFIG)
 
-    # OTIF atual vs potencial
+    # OTIF atual vs potencial (simulacao via range join pedido x inventario)
     with col2:
         st.markdown("**OTIF atual vs potencial sem stockout**")
         otif_atual = round(100 * d["pedidos_on_time"].sum() / d["total_pedidos"].sum(), 1)
 
-        # Simulacao: pedidos dos dias com stockout passam a ter a mesma taxa dos dias sem stockout
-        d_so  = d[d["stockout_flag"]]
-        d_nso = d[~d["stockout_flag"]]
-        otif_ns_rate = d_nso["pedidos_on_time"].sum() / d_nso["total_pedidos"].sum() if d_nso["total_pedidos"].sum() > 0 else 0
-        pedidos_on_time_pot = d_nso["pedidos_on_time"].sum() + d_so["total_pedidos"].sum() * otif_ns_rate
-        otif_potencial = round(100 * pedidos_on_time_pot / d["total_pedidos"].sum(), 1)
+        # Simulacao: pedidos que passaram por stockout no ciclo order->delivery recebem a taxa dos pedidos sem stockout
+        # Base consistente: on_time_atual vem do OBT (6.282 pedidos, incluindo 306 sem entrega como falha)
+        # Ganho = quantos pedidos a mais chegariam no prazo se o grupo stockout tivesse a taxa do grupo sem stockout
+        pedidos_so = carregar_pedidos_com_stockout()
+        regioes_ativas = df["region"].unique()
+        produtos_ativos = df["product"].unique()
+        pedidos_f = pedidos_so[
+            pedidos_so["region"].isin(regioes_ativas)
+            & pedidos_so["product"].isin(produtos_ativos)
+            & (pedidos_so["order_date"] >= df["date"].min())
+            & (pedidos_so["order_date"] <= df["date"].max())
+        ]
+        p_so  = pedidos_f[pedidos_f["had_stockout"]]
+        p_nso = pedidos_f[~pedidos_f["had_stockout"]]
+        otif_ns_rate = p_nso["on_time"].mean() if len(p_nso) > 0 else 0
+        otif_so_rate  = p_so["on_time"].mean()  if len(p_so)  > 0 else 0
+        on_time_atual  = d["pedidos_on_time"].sum()
+        total_pedidos  = d["total_pedidos"].sum()
+        extra_on_time  = len(p_so) * (otif_ns_rate - otif_so_rate)
+        otif_potencial = round(100 * (on_time_atual + extra_on_time) / total_pedidos, 1) if total_pedidos > 0 else otif_atual
 
         fig = go.Figure(go.Bar(
             x=[otif_atual, otif_potencial],
@@ -599,6 +667,29 @@ def tab_causas(df: pd.DataFrame, granularidade: str):
         )
         st.plotly_chart(fig, use_container_width=True, config=CHART_CONFIG)
 
+    with st.expander("Por que a fracao de pedidos afetados por stockout e maior do que a fracao de dias com stockout?"):
+        st.caption(
+            "A abordagem anterior juntava cada pedido ao estoque do seu order_date: se naquele dia especifico havia stockout, o pedido era marcado como 'afetado'. "
+            "Resultado: uma fracao pequena dos pedidos era capturada, com ganho marginal no OTIF.\n\n"
+            "O problema: o lead time real e de varios dias. Um stockout que comeca apos o pedido nao e capturado por esse join, e possivelmente contribui para atrasos na entrega.\n\n"
+            "**Exemplo:** pedido feito em 01/Jul, entregue em 10/Jul (EU, Produto C).\n\n"
+            "```\n"
+            "Data      stock_level   stockout\n"
+            "01/Jul        450         Nao   <- order_date: join antigo para aqui\n"
+            "02/Jul        380         Nao\n"
+            "03/Jul        120         Nao\n"
+            "04/Jul          0         SIM  <- estoque acaba\n"
+            "05/Jul          0         SIM\n"
+            "06/Jul          0         SIM\n"
+            "07/Jul          0         SIM  <- pedido fica parado\n"
+            "08/Jul        200         Nao   <- reabastecimento\n"
+            "10/Jul        410         Nao   <- entrega com 4 dias de atraso\n"
+            "```\n\n"
+            "O join antigo classifica esse pedido como 'sem stockout'. O range join (order_date ate actual_delivery_date) detecta os dias de ruptura no meio do ciclo.\n\n"
+            "Com uma janela de entrega de varios dias e stockout ocorrendo em uma parcela significativa do calendario, a probabilidade de algum dia nessa janela coincidir com stockout e maior do que a probabilidade do dia exato do pedido estar em stockout. "
+            "Isso possivelmente explica a diferenca observada entre as duas abordagens, embora a relacao de causalidade precise de validacao operacional."
+        )
+
 
 # ---------------------------------------------------------------------------
 # Tab 4 , O que fazer e quando?
@@ -607,27 +698,27 @@ def tab_causas(df: pd.DataFrame, granularidade: str):
 def tab_recomendacoes(df: pd.DataFrame):
     st.subheader("O que fazer e quando?")
     st.caption(
-        "Prioridades revisadas com base nos achados quantitativos: o desalinhamento entre SLA contratado (5d) e lead time real (8.8d) e o principal driver do OTIF baixo, "
-        "afetando 77.6% dos pedidos. A redistribuicao de estoque e operacionalmente correta mas tem impacto direto de apenas 0.2pp no OTIF. "
-        "A ausencia de status_pedido em 4.9% dos registros significa que o problema pode ser ainda maior do que o medido."
+        "Prioridades revisadas com base nos achados quantitativos: o desalinhamento entre o SLA contratado e o lead time real e o principal driver do OTIF baixo, "
+        "afetando a maioria dos pedidos. A redistribuicao de estoque, se as premissas de causalidade estiverem corretas, possivelmente e executavel sem aumento de producao e com impacto estimado no OTIF global. "
+        "A ausencia de data de entrega em uma parcela dos registros significa que o problema pode ser ainda maior do que o medido."
     )
 
     st.markdown(
         "| Prioridade | Acao | Impacto | Quando atuar |\n"
         "|---|---|---|---|\n"
-        "| Alta | Revisar SLA de 5 para 8-9 dias | Lead time real medio e de 8.8 dias, mas o SLA contratado e de 5 dias. 77.6% dos pedidos chegam apos a data prometida, com atraso medio de 3.8 dias alem do SLA. Realinhar o SLA com a capacidade operacional real e a acao de maior impacto imediato no OTIF. | Imediato |\n"
-        "| Alta | Implementar status_pedido no sistema transacional | 306 pedidos (4.9%) sem data de entrega tornam o OTIF impreciso. O problema real pode ser maior do que os 17.5% medidos. | Imediato |\n"
-        "| Media | Criar plano de redistribuicao de estoque entre regioes por produto | Produto C com excesso em LATAM enquanto outras regioes estao em ruptura por 17+ dias. Impacto direto no OTIF de 0.2pp, mas relevante para reducao de capital imobilizado e nivelamento operacional. | Antes do Q3 |\n"
-        "| Media | Criar politica de reabastecimento diferenciada por produto e regiao | Produtos A, B e C tem perfis de stockout distintos por periodo. Politica unica de reposicao subaproveita a previsibilidade disponivel nos dados historicos. | Q2 |\n"
-        "| Baixa | Implementar visibilidade compartilhada de estoque entre regioes | Correlacoes de stock_level proximas de zero sao um indicio (nao prova) de operacao descoordenada. Visibilidade compartilhada permitiria redistribuicao proativa antes da ruptura. | Q2-Q3 |\n"
-        "| Baixa | Auditar registros de estoque negativo e producao_capacity | 336 dias com stock_level negativo distorcem analises de overflow e correlacao. Inconsistencias em producao_capacity dificultam projecoes de capacidade. | Q4 |\n"
+        "| Alta | Revisar SLA | O lead time real e sistematicamente superior ao SLA contratado. A maioria dos pedidos chega apos a data prometida. Realinhar o SLA com a capacidade operacional real possivelmente seria a acao de maior impacto imediato no OTIF. | Imediato |\n"
+        "| Alta | Implementar status_pedido no sistema transacional | Uma parcela dos pedidos nao tem data de entrega registrada, tornando o OTIF impreciso. O problema real pode ser maior do que o medido. | Imediato |\n"
+        "| Media | Criar plano de redistribuicao de estoque entre regioes por produto | Ha regioes com excesso e outras em ruptura para o mesmo produto no mesmo periodo. Capital possivelmente imobilizado na regiao errada. Resolver o desequilibrio possivelmente elevaria o OTIF sem necessidade de aumentar producao, sujeito a validacao operacional. | Antes do periodo critico |\n"
+        "| Media | Criar politica de reabastecimento diferenciada por produto e regiao | Cada produto e regiao apresenta perfil de stockout distinto por periodo. Uma politica unica de reposicao possivelmente subaproveita a previsibilidade disponivel nos dados historicos. | Q2 |\n"
+        "| Baixa | Implementar visibilidade compartilhada de estoque entre regioes | Ha indicio de operacao descoordenada entre regioes. Visibilidade compartilhada permitiria redistribuicao proativa antes da ruptura. | Q2-Q3 |\n"
+        "| Baixa | Auditar registros de estoque negativo e capacidade de producao | Registros com valores inconsistentes possivelmente distorcem analises de overflow, correlacao e projecao de capacidade. | Q4 |\n"
     )
 
     st.markdown("---")
     with st.expander("Por que esse grafico?", expanded=True):
         st.caption(
             "Motivacao: sequenciar as acoes no tempo considerando janelas operacionais criticas. "
-            "Conclusao: acoes de curto prazo devem ser executadas antes do Q3, que e sistematicamente o pior trimestre e o momento de maior pressao sobre o estoque."
+            "Os dados sugerem que acoes de curto prazo deveriam ser executadas antes do periodo critico, que parece ser sistematicamente o de maior pressao sobre o estoque."
         )
     st.markdown("**Cronograma de acoes ao longo do ano**")
 
@@ -658,10 +749,10 @@ def tab_recomendacoes(df: pd.DataFrame):
 
     with st.expander("Como o SLA de 5 dias foi obtido", expanded=True):
         st.caption(
-            "O SLA de 5 dias e confirmado diretamente nos dados: todos os pedidos tem requested_delivery_date = order_date + 5 dias. "
-            "O lead time real medio e de 8.8 dias (order_date ate actual_delivery_date), "
-            "gerando um atraso medio de 3.8 dias alem do prazo prometido. "
-            "A recomendacao de revisar para 8-9 dias alinha o SLA com a capacidade operacional real "
+            "O SLA contratado e confirmado diretamente nos dados: todos os pedidos tem requested_delivery_date = order_date + SLA. "
+            "O lead time real medio (order_date ate actual_delivery_date) e superior ao SLA, "
+            "gerando um atraso medio alem do prazo prometido. "
+            "A recomendacao de revisar o SLA alinha o contrato com a capacidade operacional real "
             "enquanto as causas raiz do lead time elevado sao endereçadas."
         )
 
@@ -704,10 +795,10 @@ def main():
     st.title("Case Ball")
     st.caption(
         "OTIF (On Time In Full) mede a porcentagem de pedidos entregues no prazo e na quantidade correta. "
-        "Um OTIF baixo indica falhas sistematicas que afetam diretamente o cliente final. "
-        "Com tempo de analise limitado, optei por concentrar o estudo nessa metrica por ser a de maior "
-        "impacto visivel, pois ela sintetiza falhas de estoque, producao e logistica em um unico numero, "
-        "permitindo identificar causas raiz e recomendar acoes com maior retorno potencial."
+        "Um OTIF baixo pode indicar falhas sistematicas com impacto no cliente final. "
+        "Esta analise concentra o estudo nessa metrica por possivelmente sintetizar falhas de estoque, producao e logistica em um unico numero, "
+        "permitindo identificar possiveis causas raiz e recomendar acoes com maior retorno potencial. "
+        "Limitacao dos dados: os pedidos registram apenas quantidade solicitada, sem quantidade entregue. "
     )
 
     df = carregar_dados()
@@ -725,7 +816,7 @@ def main():
 
     tab1, tab2, tab3, tab4 = st.tabs([
         "Qual e o problema?",
-        "O estoque esta no lugar errado",
+        "O estoque esta no lugar errado?",
         "O que causa os atrasos graves?",
         "O que fazer e quando?",
     ])
