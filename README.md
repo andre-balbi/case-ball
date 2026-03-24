@@ -2,6 +2,19 @@
 
 Analise de dados operacionais de supply chain (2023-2024) para as regioes LATAM, NA, EU e APAC, produtos A, B e C.
 
+A metrica central e o OTIF (On Time In Full) : utilizado aqui como proxy de pontualidade de entrega (OTD), pois os dados nao registram quantidade entregue, apenas solicitada.
+
+## Stack
+
+| Camada                   | Tecnologia                     |
+| ------------------------ | ------------------------------ |
+| Transformacao de dados   | Python + DuckDB (SQL embutido) |
+| Orquestracao do pipeline | `main.py`                    |
+| Dashboard interativo     | Streamlit                      |
+| Deploy                   | Modal (conta pessoal)          |
+
+DuckDB foi escolhido por operar localmente sem servidor, ser amplamente utilizado em projetos on-premise, e permitir transformacoes em SQL puro mantendo o codigo familiar e auditavel .
+
 ## Execucao
 
 Requer Python 3.10+ e `uv`.
@@ -11,22 +24,14 @@ Requer Python 3.10+ e `uv`.
 uv venv --python 3.10 .venv
 uv pip install -r requirements.txt
 
-# executar pipeline completo
+# executar pipeline completo (bronze -> silver -> gold)
 .venv/bin/python main.py
-```
 
-O pipeline executa as tres camadas em sequencia e gera todos os arquivos de saida.
-
-### Dashboard Streamlit (local)
-
-Pre-requisito: executar o pipeline (`main.py`) para gerar os artefatos em `data/gold/`.
-
-```bash
 # rodar o dashboard localmente
 .venv/bin/streamlit run app/dashboard.py --server.port 8000
 ```
 
-O dashboard consome os artefatos gerados em `data/gold/` e usa o tema claro definido em `.streamlit/config.toml`. O logo `figs/logo-ball.jpg` esta empacotado no repositorio; basta executar localmente, sem configuracao extra.
+O dashboard consome os artefatos gerados em `data/gold/` e os arquivos silver para calculos de range join. O logo `figs/logo-ball.jpg` esta empacotado no repositorio.
 
 ## Estrutura
 
@@ -34,37 +39,79 @@ O dashboard consome os artefatos gerados em `data/gold/` e usa o tema claro defi
 data/
   raw/           # CSVs originais (nao modificar)
   bronze/        # Dados carregados com tipos corretos + quality_report.json
-  silver/        # Dados limpos com colunas derivadas
-  gold/          # Metricas analiticas prontas para consumo
+  silver/        # Dados limpos com colunas derivadas (orders, inventory, production)
+  gold/          # OBT (One Big Table) e metricas analiticas prontas para consumo
 src/
-  bronze.py      # Ingestao e validacao
-  silver.py      # Limpeza, deduplicacao e enriquecimento
-  gold.py        # Calculo de metricas (OTIF, estoque, producao, balanco)
+  bronze.py      # Ingestao, validacao de tipos e quality report
+  silver.py      # Limpeza, deduplicacao, colunas derivadas (on_time, stockout_flag, etc.)
+  gold.py        # Calculo de metricas e construcao da OBT (grain: date x region x product)
+app/
+  dashboard.py   # Dashboard Streamlit com 4 abas
 notebooks/
-  bronze.ipynb   # Documentacao da camada bronze
-  silver.ipynb   # Documentacao da camada silver
-  gold.ipynb     # Documentacao das metricas gold
-  insights.ipynb # Analise de insights e recomendacoes
+  bronze.ipynb   # Exploracao da camada bronze
+  silver.ipynb   # Exploracao da camada silver
+  gold.ipynb     # Exploracao das metricas gold
+  insights.ipynb # Analise de insights e recomendacoes priorizadas
 docs/
-  CONTEXT.md     # Dicionario de dados, metricas e premissas
-  PRD.md         # Requisitos do projeto
-  insights.md    # Insights e recomendacoes (documento final)
+  CONTEXT.md     # Dicionario de dados, metricas, premissas e problemas de qualidade
+deploy.py        # Configuracao de deploy na Modal
 main.py          # Orquestrador do pipeline
 ```
 
-## Saidas da Camada Gold
+## Pipeline de Dados
 
-| Arquivo                        | Conteudo                                          |
-| ------------------------------ | ------------------------------------------------- |
-| `otif_summary.csv`           | OTIF geral, atraso medio, mediano e P90           |
-| `otif_by_region.csv`         | OTIF por regiao                                   |
-| `otif_by_product.csv`        | OTIF por produto                                  |
-| `otif_monthly.csv`           | OTIF mensal (2023-2024)                           |
-| `stockout_summary.csv`       | Frequencia de stockout por regiao/produto         |
-| `overflow_summary.csv`       | Frequencia de overflow por regiao/produto         |
-| `production_utilization.csv` | Taxa de utilizacao por planta/produto             |
-| `supply_demand_gap.csv`      | Gap diario oferta/demanda com flag de gap cronico |
+O pipeline segue a arquitetura medallion (bronze -> silver -> gold):
 
-## Resultado Principal
+| Camada | Responsabilidade                                                                                                           |
+| ------ | -------------------------------------------------------------------------------------------------------------------------- |
+| Bronze | Ingestao dos CSVs com tipagem correta e registro de problemas de qualidade                                                 |
+| Silver | Limpeza, deduplicacao e criacao de colunas derivadas (`on_time`, `stockout_flag`, `overflow_flag`, `atraso_medio`) |
+| Gold   | Agregacao por `(date, region, product)` na OBT e calculo de metricas de OTIF, estoque e producao                         |
 
-OTIF geral de **17,5%** — problema estrutural sem concentracao em regiao ou produto especifico. Os principais fatores identificados sao desbalanco de estoque entre regioes e SLA de entrega incompativel com o lead time real da operacao. Ver `docs/insights.md` para analise completa e recomendacoes priorizadas.
+## OBT (One Big Table)
+
+Arquivo principal de analise: `data/gold/obt.parquet`
+
+Grain: `date x region x product`. 8.772 linhas, cobrindo Jan 2023 a Dez 2024.
+
+Colunas principais:
+
+| Coluna                 | Descricao                                                      |
+| ---------------------- | -------------------------------------------------------------- |
+| `total_pedidos`      | Pedidos realizados naquele dia/regiao/produto                  |
+| `pedidos_on_time`    | Pedidos entregues ate a data prometida                         |
+| `pedidos_com_atraso` | Pedidos com `actual_delivery_date > requested_delivery_date` |
+| `atraso_medio`       | `AVG(actual_delivery_date - requested_delivery_date)` . Media de todos os pedidos do dia/regiao/produto, incluindo os no prazo (valores negativos puxam a media para baixo) |
+| `stockout_flag`      | `stock_level <= 0` (inclui backorder)                        |
+| `overflow_flag`      | `stock_level > warehouse_capacity`                           |
+
+## Dashboard
+
+O dashboard esta organizado em 4 abas:
+
+| Aba                            | Pergunta respondida                                                         |
+| ------------------------------ | --------------------------------------------------------------------------- |
+| Qual e o problema?             | Evolucao e distribuicao do OTIF por periodo, regiao e produto               |
+| O estoque esta no lugar certo? | Desequilibrio simultaneo (stockout vs overflow) entre regioes               |
+| O que causa os atrasos?        | Co-ocorrencia de stockout e atraso; impacto estimado no OTIF via range join |
+| O que fazer e quando?          | Recomendacoes priorizadas e simulacao de impacto por SLA                    |
+
+A simulacao de impacto do stockout usa range join (`order_date -> actual_delivery_date`) para identificar pedidos que passaram por pelo menos 1 dia de ruptura no ciclo de entrega . Metodo mais preciso do que o join por `order_date`, que subestima o impacto.
+
+## Notebooks
+
+Os notebooks documentam o racional de cada etapa do pipeline e os insights finais:
+
+- `bronze.ipynb` e `silver.ipynb`: problemas de qualidade encontrados e decisoes de limpeza
+- `gold.ipynb`: construcao e validacao da OBT
+- `insights.ipynb`: analise completa seguindo a narrativa qualidade de dados -> SLA vs lead time -> desequilibrio geografico -> causalidade stockout/atraso -> recomendacoes
+
+## Dados de Entrada
+
+| Arquivo            | Grain                  | Linhas |
+| ------------------ | ---------------------- | ------ |
+| `orders.csv`     | por pedido             | 6.282  |
+| `production.csv` | regiao x produto x dia | 8.772  |
+| `inventory.csv`  | regiao x produto x dia | 8.772  |
+
+Regioes: `LATAM`, `NA`, `EU`, `APAC`. Produtos: `A`, `B`, `C`. Periodo: Jan 2023 a Dez 2024
