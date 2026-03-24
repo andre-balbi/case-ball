@@ -538,7 +538,7 @@ def tab_causas(df: pd.DataFrame, granularidade: str):
             "Grafico da direita: simula o OTIF total se os pedidos dos dias com stockout tivessem a mesma taxa de cumprimento dos dias sem stockout. "
             "Resultado esperado: o ganho e pequeno (~0.2pp) porque stockout afeta apenas ~4% dos pedidos em volume. "
             "Isso revela que stockout NAO e a causa primaria do OTIF baixo: mesmo nos dias sem ruptura o OTIF e de apenas 17.7%. "
-            "O principal driver e o desalinhamento entre o SLA contratado (5 dias) e o atraso medio operacional (3.7 dias) , que classifica como falha a maioria dos pedidos independente de stockout. Ver Tab 4 para simulacao de SLA."
+            "O principal driver e o desalinhamento entre o SLA contratado (5 dias) e o lead time real (8.8 dias em media), gerando atraso de 3.8 dias por pedido e classificando 77.6% dos pedidos como falha independente de stockout. Ver Tab 4 para simulacao de SLA."
         )
     col1, col2 = st.columns(2)
 
@@ -607,51 +607,20 @@ def tab_causas(df: pd.DataFrame, granularidade: str):
 def tab_recomendacoes(df: pd.DataFrame):
     st.subheader("O que fazer e quando?")
     st.caption(
-        "Prioridades revisadas com base nos achados quantitativos: o SLA desalinhado e o principal driver do OTIF baixo, "
-        "afetando 96% dos pedidos. A redistribuicao de estoque e operacionalmente correta mas tem impacto direto de apenas 0.2pp no OTIF. "
+        "Prioridades revisadas com base nos achados quantitativos: o desalinhamento entre SLA contratado (5d) e lead time real (8.8d) e o principal driver do OTIF baixo, "
+        "afetando 77.6% dos pedidos. A redistribuicao de estoque e operacionalmente correta mas tem impacto direto de apenas 0.2pp no OTIF. "
         "A ausencia de status_pedido em 4.9% dos registros significa que o problema pode ser ainda maior do que o medido."
     )
 
-    recomendacoes = pd.DataFrame([
-        (1, "Alta",
-         "Revisar SLA de 5 para 7-8 dias",
-         "Principal driver do OTIF baixo: SLA de 5d com atraso medio de 3.7d classifica como falha a maioria dos pedidos. "
-         "Nao resolve a operacao, mas alinha o contrato com a realidade enquanto as causas raiz sao tratadas.",
-         "Imediato"),
-        (2, "Alta",
-         "Implementar status_pedido no sistema transacional",
-         "306 pedidos (4.9%) sem data de entrega tornam o OTIF impreciso. "
-         "O problema real pode ser maior do que os 17.5% medidos.",
-         "Imediato"),
-        (3, "Media",
-         "Criar plano de redistribuicao de estoque entre regioes por produto",
-         "Produto C com excesso em LATAM enquanto outras regioes estao em ruptura por 17+ dias. "
-         "Impacto direto no OTIF de 0.2pp, mas relevante para reducao de capital imobilizado e nivelamento operacional.",
-         "Antes do Q3"),
-        (4, "Media",
-         "Criar politica de reabastecimento diferenciada por produto e regiao",
-         "Produtos A, B e C tem perfis de stockout distintos por periodo. "
-         "Politica unica de reposicao subaproveita a previsibilidade disponivel nos dados historicos.",
-         "Q2"),
-        (5, "Baixa",
-         "Implementar visibilidade compartilhada de estoque entre regioes",
-         "Correlacoes de stock_level proximas de zero sao um indicio (nao prova) de operacao descoordenada. "
-         "Visibilidade compartilhada permitiria redistribuicao proativa antes da ruptura.",
-         "Q2-Q3"),
-        (6, "Baixa",
-         "Auditar registros de estoque negativo e producao_capacity",
-         "336 dias com stock_level negativo distorcem analises de overflow e correlacao. "
-         "Inconsistencias em producao_capacity dificultam projecoes de capacidade.",
-         "Q4"),
-    ], columns=["#", "Prioridade", "Acao", "Impacto", "Quando atuar"])
-
-    st.dataframe(
-        recomendacoes, use_container_width=True, hide_index=True,
-        column_config={
-            "#": st.column_config.NumberColumn(width="small"),
-            "Prioridade": st.column_config.TextColumn(width="small"),
-            "Quando atuar": st.column_config.TextColumn(width="small"),
-        },
+    st.markdown(
+        "| Prioridade | Acao | Impacto | Quando atuar |\n"
+        "|---|---|---|---|\n"
+        "| Alta | Revisar SLA de 5 para 8-9 dias | Lead time real medio e de 8.8 dias, mas o SLA contratado e de 5 dias. 77.6% dos pedidos chegam apos a data prometida, com atraso medio de 3.8 dias alem do SLA. Realinhar o SLA com a capacidade operacional real e a acao de maior impacto imediato no OTIF. | Imediato |\n"
+        "| Alta | Implementar status_pedido no sistema transacional | 306 pedidos (4.9%) sem data de entrega tornam o OTIF impreciso. O problema real pode ser maior do que os 17.5% medidos. | Imediato |\n"
+        "| Media | Criar plano de redistribuicao de estoque entre regioes por produto | Produto C com excesso em LATAM enquanto outras regioes estao em ruptura por 17+ dias. Impacto direto no OTIF de 0.2pp, mas relevante para reducao de capital imobilizado e nivelamento operacional. | Antes do Q3 |\n"
+        "| Media | Criar politica de reabastecimento diferenciada por produto e regiao | Produtos A, B e C tem perfis de stockout distintos por periodo. Politica unica de reposicao subaproveita a previsibilidade disponivel nos dados historicos. | Q2 |\n"
+        "| Baixa | Implementar visibilidade compartilhada de estoque entre regioes | Correlacoes de stock_level proximas de zero sao um indicio (nao prova) de operacao descoordenada. Visibilidade compartilhada permitiria redistribuicao proativa antes da ruptura. | Q2-Q3 |\n"
+        "| Baixa | Auditar registros de estoque negativo e producao_capacity | 336 dias com stock_level negativo distorcem analises de overflow e correlacao. Inconsistencias em producao_capacity dificultam projecoes de capacidade. | Q4 |\n"
     )
 
     st.markdown("---")
@@ -687,17 +656,16 @@ def tab_recomendacoes(df: pd.DataFrame):
     )
     st.plotly_chart(fig, use_container_width=True, config=CHART_CONFIG)
 
-    with st.expander("Como o SLA de 5 dias foi inferido", expanded=True):
+    with st.expander("Como o SLA de 5 dias foi obtido", expanded=True):
         st.caption(
-            "O OBT nao tem uma coluna sla_dias explicita. O valor de 5 dias foi inferido: "
-            "e o unico limiar que torna o OTIF de ~17,5% coerente com um atraso medio de 3,7 dias. "
-            "Com SLA de 7 ou 8 dias o OTIF seria muito maior. "
-            "A recomendacao de flexibilizar para 7-8 dias nao resolve o problema de distribuicao , "
-            "apenas alinha o contrato com a realidade operacional enquanto as causas raiz sao endereçadas. "
-            "Limitacao: se o dataset original tiver prazo_contratado explicito, esse valor deve sobrescrever a inferencia."
+            "O SLA de 5 dias e confirmado diretamente nos dados: todos os pedidos tem requested_delivery_date = order_date + 5 dias. "
+            "O lead time real medio e de 8.8 dias (order_date ate actual_delivery_date), "
+            "gerando um atraso medio de 3.8 dias alem do prazo prometido. "
+            "A recomendacao de revisar para 8-9 dias alinha o SLA com a capacidade operacional real "
+            "enquanto as causas raiz do lead time elevado sao endereçadas."
         )
 
-    st.markdown("**OTIF simulado por SLA , impacto de flexibilizar o contrato**")
+    st.markdown("**OTIF simulado por SLA, impacto de flexibilizar o contrato**")
     d = df[df["total_pedidos"] > 0].copy()
     sla_vals = [5, 6, 7, 8, 10]
     otif_por_sla = []
