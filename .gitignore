@@ -1,0 +1,19 @@
+.venv/
+
+data/bronze/
+data/silver/
+data/gold/
+
+__pycache__/
+*.pyc
+.DS_Store
+
+# Others
+.env
+.vscode/
+.taskmaster/
+design/
+.claude/
+docs/
+AGENTS.md
+CLAUDE.md
